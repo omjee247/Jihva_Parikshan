@@ -72,7 +72,7 @@ bg_uri, bg_size_mode = get_background_image_data_uri()
 
 st.markdown(f"""
 <style>
-    /* Hide all Streamlit branding, top toolbar, sidebar toggle, footer, and developer profile/crown badges */
+    /* Hide all Streamlit branding, top toolbar, sidebar toggle, footer, and developer profile/creator/crown badges */
     #MainMenu {{visibility: hidden !important; display: none !important;}}
     footer {{visibility: hidden !important; display: none !important;}}
     header {{visibility: hidden !important; display: none !important;}}
@@ -80,22 +80,46 @@ st.markdown(f"""
     [data-testid="stDecoration"],
     [data-testid="stStatusWidget"],
     [data-testid="manage-app-button"],
+    [data-testid="appCreatorAvatar"],
+    [data-testid*="appCreator"],
+    [data-testid*="profile"],
     [data-testid="stSidebar"],
     [data-testid="collapsedControl"],
     .stAppDeployButton,
-    [class^="viewerBadge_"],
-    [class*="viewerBadge_"],
-    [class^="profilePreview_"],
-    [class*="profilePreview_"],
+    [class^="viewerBadge"],
+    [class*="viewerBadge"],
+    [class*="_viewerBadge"],
+    [class^="profileContainer"],
+    [class*="profileContainer"],
+    [class*="_profileContainer"],
+    [class^="profilePreview"],
+    [class*="profilePreview"],
+    [class*="_profilePreview"],
+    [class^="profileImage"],
+    [class*="profileImage"],
+    [class*="_profileImage"],
+    [class*="_container_gzau3"],
+    [class*="_link_gzau3"],
     [class^="styles_viewerBadge__"],
+    img[src*="avatars.githubusercontent.com"],
+    img[alt*="Creator"],
+    img[alt*="profile" i],
     a[href*="streamlit.io/cloud"],
-    a[href*="share.streamlit.io/user"] {{
+    a[href*="share.streamlit.io"],
+    a[href*="github.com/omjee"] {{
         display: none !important;
         visibility: hidden !important;
         opacity: 0 !important;
         pointer-events: none !important;
         height: 0 !important;
         width: 0 !important;
+        max-height: 0 !important;
+        max-width: 0 !important;
+        overflow: hidden !important;
+        position: fixed !important;
+        bottom: -9999px !important;
+        right: -9999px !important;
+        z-index: -9999 !important;
     }}
 
     /* Ultra-Light Translucent Veil over the Ayurvedic Rishi & Herbs Background for Effortless Readability */
@@ -245,33 +269,87 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-# Active DOM script to hide any Streamlit Cloud viewer/profile badges
+# Active multi-frame DOM script to hide/remove Streamlit Cloud "Created by ..." avatar & viewer badges
 components.html(
     """
     <script>
     (function() {
-        function hideBadges() {
+        const selectors = [
+            '[class*="viewerBadge"]',
+            '[class*="_viewerBadge"]',
+            '[class*="profileContainer"]',
+            '[class*="_profileContainer"]',
+            '[class*="profilePreview"]',
+            '[class*="_profilePreview"]',
+            '[class*="profileImage"]',
+            '[class*="_profileImage"]',
+            '[class*="_container_gzau3"]',
+            '[class*="_link_gzau3"]',
+            '[data-testid="appCreatorAvatar"]',
+            '[data-testid*="appCreator"]',
+            '[data-testid="manage-app-button"]',
+            'img[src*="avatars.githubusercontent.com"]',
+            'a[href*="streamlit.io/cloud"]',
+            'a[href*="share.streamlit.io"]',
+            'a[href*="github.com/omjee"]'
+        ];
+        const cssRule = selectors.join(', ') + ' { display: none !important; visibility: hidden !important; opacity: 0 !important; width: 0 !important; height: 0 !important; pointer-events: none !important; position: fixed !important; bottom: -9999px !important; right: -9999px !important; }';
+
+        function getReachableDocs() {
+            const docs = [];
+            const candidates = [window, window.parent, window.parent ? window.parent.parent : null, window.top];
+            for (const win of candidates) {
+                try {
+                    if (win && win.document && !docs.includes(win.document)) {
+                        docs.push(win.document);
+                    }
+                } catch (e) {}
+            }
+            return docs;
+        }
+
+        function cleanDoc(doc) {
             try {
-                const doc = window.parent.document;
-                const selectors = [
-                    '[class^="viewerBadge_"]',
-                    '[class*="viewerBadge_"]',
-                    '[class^="profilePreview_"]',
-                    '[class*="profilePreview_"]',
-                    '[data-testid="manage-app-button"]',
-                    'a[href*="streamlit.io/cloud"]',
-                    'a[href*="share.streamlit.io/user"]'
-                ];
+                if (doc.head && !doc.getElementById('hide-st-creator-style')) {
+                    const styleEl = doc.createElement('style');
+                    styleEl.id = 'hide-st-creator-style';
+                    styleEl.innerHTML = cssRule;
+                    doc.head.appendChild(styleEl);
+                }
                 selectors.forEach(sel => {
                     doc.querySelectorAll(sel).forEach(el => {
-                        el.style.display = 'none';
-                        el.style.visibility = 'hidden';
+                        el.style.setProperty('display', 'none', 'important');
+                        el.style.setProperty('visibility', 'hidden', 'important');
+                        el.style.setProperty('opacity', '0', 'important');
+                        el.remove();
                     });
+                });
+                // Also catch any element containing "Created by" or the creator username in the bottom-right corner
+                doc.querySelectorAll('div, a, span, aside, footer').forEach(el => {
+                    const txt = (el.textContent || '').trim();
+                    if ((txt.startsWith('Created by') || txt === 'omjee247' || txt.includes('Created by omjee')) && txt.length < 60) {
+                        el.style.setProperty('display', 'none', 'important');
+                        if (el.parentElement && (el.parentElement.textContent || '').trim().length < 80) {
+                            el.parentElement.style.setProperty('display', 'none', 'important');
+                        }
+                    }
                 });
             } catch (e) {}
         }
-        hideBadges();
-        setInterval(hideBadges, 800);
+
+        function hideAllBadges() {
+            getReachableDocs().forEach(cleanDoc);
+        }
+
+        hideAllBadges();
+        setInterval(hideAllBadges, 300);
+
+        getReachableDocs().forEach(doc => {
+            try {
+                const obs = new MutationObserver(hideAllBadges);
+                obs.observe(doc.documentElement || doc.body, { childList: true, subtree: true });
+            } catch (e) {}
+        });
     })();
     </script>
     """,
