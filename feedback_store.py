@@ -1,9 +1,6 @@
 """
 Feedback Sanitizer, Adaptive Calibration Store & Patient Review Engine.
-Answers the requirement:
-- Stores feedback on tongue analysis results so future predictions become more accurate.
-- Automatically cleans/filters out irrelevant, noisy, spammy, or contradictory feedback in the backend
-  before admitting it into the active training corpus.
+Backend-only sanitization & KNN calibration (transparent to end-users).
 """
 
 import os
@@ -26,7 +23,7 @@ AYURVEDIC_DOMAIN_KEYWORDS = {
 
 BANNED_SPAM_PATTERNS = [
     r"https?://", r"www\.", r"buy now", r"crypto", r"casino", r"loan", r"discount",
-    r"(.)\1{5,}",  # repeated character spam like "aaaaaaa"
+    r"(.)\1{5,}",
 ]
 
 
@@ -79,26 +76,15 @@ def sanitize_and_validate_feedback(
     corrected_fissures: str,
     raw_notes: str
 ) -> Tuple[bool, float, str, str]:
-    """
-    Backend Multi-Stage Anti-Noise & Irrelevant Data Filter:
-    1. Spam & URL Removal: Strips URLs, phone numbers, emails, and gibberish.
-    2. Domain Relevance Token Filtering: Extracts only clinically/Ayurvedically relevant sentences.
-    3. Biometric Plausibility Check (Anti-Poisoning): Rejects feedback that contradicts objective
-       extreme pixel measurements (e.g., claiming 'Absent Coating' when >55% of tongue is white-coated,
-       or claiming 'Red' when CIE LAB 'A' channel is extremely pale <134).
-    """
     notes = (raw_notes or "").strip()
 
-    # Check spam patterns
     for pat in BANNED_SPAM_PATTERNS:
         if re.search(pat, notes, flags=re.IGNORECASE):
-            return False, 0.0, "", "Rejected: Detected promotional/URL/repeated character spam."
+            return False, 0.0, "", "Rejected: Promotional or invalid text."
 
-    # Redact any accidental phone numbers or emails for privacy
     cleaned = re.sub(r"\b[\w\.-]+@[\w\.-]+\.\w+\b", "[REDACTED_EMAIL]", notes)
     cleaned = re.sub(r"\b\d{10,12}\b", "[REDACTED_PHONE]", cleaned)
 
-    # Filter sentences to retain only tongue/Ayurveda-relevant clinical observations
     sentences = re.split(r"[.!?\n]+", cleaned)
     relevant_sentences = []
     matched_keywords = 0
@@ -114,45 +100,18 @@ def sanitize_and_validate_feedback(
 
     cleaned_clinical_notes = ". ".join(relevant_sentences)
 
-    # Biometric Plausibility Verification against extracted OpenCV features:
-    # features = [mean_L, mean_A, mean_B, mean_S, coating_pct, fissure_density, fissure_cnt, aspect_ratio, indent_cnt, age]
     mean_A = features[1] if len(features) > 1 else 145.0
     coating_pct = features[4] if len(features) > 4 else 15.0
-    fissure_cnt = features[6] if len(features) > 6 else 0.0
 
-    # Contradiction 1: Claiming no coating when coating_pct is huge (>55%), or thick coating when <3%
     if "Absent" in corrected_coating and coating_pct > 55.0:
-        return (
-            False,
-            0.15,
-            cleaned_clinical_notes,
-            f"Rejected as outlier: Feedback claims 'Absent Coating' but objective pixel coating is {coating_pct}%."
-        )
+        return False, 0.15, cleaned_clinical_notes, "Filtered out due to coating mismatch."
     if "Thick" in corrected_coating and coating_pct < 3.0:
-        return (
-            False,
-            0.20,
-            cleaned_clinical_notes,
-            f"Rejected as outlier: Feedback claims 'Thick Coating' but measured coating area is only {coating_pct}%."
-        )
-
-    # Contradiction 2: Claiming Red tongue when A-channel is extremely low (pale)
+        return False, 0.20, cleaned_clinical_notes, "Filtered out due to coating mismatch."
     if corrected_colour.startswith("Red") and mean_A < 134.0:
-        return (
-            False,
-            0.20,
-            cleaned_clinical_notes,
-            f"Rejected as outlier: Feedback claims 'Red' tongue but CIE-LAB A* redness ({mean_A}) is in the Pale range."
-        )
+        return False, 0.20, cleaned_clinical_notes, "Filtered out due to colour mismatch."
 
-    # Compute relevance score (0.55 base for valid structured corrections + bonus for domain clinical notes)
     relevance_score = min(1.0, round(0.65 + 0.07 * min(matched_keywords, 5), 2))
-    if notes and not cleaned_clinical_notes and len(notes) > 15:
-        # User wrote free text that had zero Ayurvedic/tongue terms -> strip the irrelevant text, keep structured labels if plausible
-        cleaned_clinical_notes = "[Irrelevant free-text removed by backend sanitizer; structured labels retained]"
-        relevance_score = 0.60
-
-    return True, relevance_score, cleaned_clinical_notes, "Accepted into verified calibration dataset."
+    return True, relevance_score, cleaned_clinical_notes, "Thank you! Your clinical correction has been recorded to improve accuracy."
 
 
 def save_training_feedback(
@@ -166,7 +125,6 @@ def save_training_feedback(
     corrected_fissures: str,
     raw_notes: str
 ) -> Dict[str, Any]:
-    """Validates, sanitizes, and stores user/Vaidya feedback in SQLite."""
     init_db()
     is_accepted, rel_score, cleaned_notes, reason = sanitize_and_validate_feedback(
         features, corrected_dosha, corrected_colour, corrected_coating, corrected_fissures, raw_notes
@@ -212,10 +170,6 @@ def save_training_feedback(
 
 
 def predict_with_feedback_calibration(features: List[float], rule_dosha: str, rule_scores: Dict[str, float]) -> Dict[str, Any]:
-    """
-    Uses accepted, high-relevance feedback samples in SQLite (Weighted KNN in normalized feature space)
-    to refine Dosha probabilities so the system gets progressively more accurate with real feedback.
-    """
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -223,19 +177,14 @@ def predict_with_feedback_calibration(features: List[float], rule_dosha: str, ru
     rows = cur.fetchall()
     conn.close()
 
-    accepted_count = len(rows)
-    if accepted_count < 2:
+    if len(rows) < 2:
         return {
             "calibrated_dosha": rule_dosha,
             "calibrated_scores": rule_scores,
-            "accepted_samples_used": accepted_count,
-            "calibration_note": f"Rule-based deterministic engine active ({accepted_count} verified feedback sample(s) stored)."
+            "accepted_samples_used": len(rows)
         }
 
-    # Compute distance in standardized feature space
-    X = []
-    y_dosha = []
-    weights = []
+    X, y_dosha, weights = [], [], []
     for f_json, c_dosha, rel in rows:
         try:
             vec = json.loads(f_json)
@@ -250,8 +199,7 @@ def predict_with_feedback_calibration(features: List[float], rule_dosha: str, ru
         return {
             "calibrated_dosha": rule_dosha,
             "calibrated_scores": rule_scores,
-            "accepted_samples_used": len(X),
-            "calibration_note": "Rule-based deterministic engine active."
+            "accepted_samples_used": len(X)
         }
 
     X_arr = np.array(X, dtype=np.float64)
@@ -259,7 +207,6 @@ def predict_with_feedback_calibration(features: List[float], rule_dosha: str, ru
     std = np.std(X_arr, axis=0) + 1e-4
     dists = np.linalg.norm((X_arr - q_arr) / std, axis=1)
 
-    # Take top-k nearest verified samples
     k = min(5, len(X))
     nearest_idx = np.argsort(dists)[:k]
 
@@ -281,13 +228,11 @@ def predict_with_feedback_calibration(features: List[float], rule_dosha: str, ru
 
     tot_vote = sum(knn_votes.values())
     if tot_vote > 1e-5:
-        # Blend 75% deterministic OpenCV rule score + 25% verified KNN feedback calibration
         alpha = min(0.30, 0.06 * len(X))
         blended = {}
         for d in ["Vata", "Pitta", "Kapha"]:
             knn_pct = (knn_votes[d] / tot_vote) * 100.0
             blended[d] = round((1.0 - alpha) * rule_scores[d] + alpha * knn_pct, 1)
-        # Normalize to 100%
         s_tot = max(1.0, sum(blended.values()))
         for d in blended:
             blended[d] = round((blended[d] / s_tot) * 100.0, 1)
@@ -297,37 +242,13 @@ def predict_with_feedback_calibration(features: List[float], rule_dosha: str, ru
         return {
             "calibrated_dosha": calibrated_dosha,
             "calibrated_scores": blended,
-            "accepted_samples_used": len(X),
-            "calibration_note": f"Calibrated using {len(X)} verified feedback samples (blend weight {int(alpha*100)}%)."
+            "accepted_samples_used": len(X)
         }
 
     return {
         "calibrated_dosha": rule_dosha,
         "calibrated_scores": rule_scores,
-        "accepted_samples_used": len(X),
-        "calibration_note": "Rule-based deterministic engine active."
-    }
-
-
-def get_feedback_stats() -> Dict[str, Any]:
-    init_db()
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*), SUM(CASE WHEN is_accepted=1 THEN 1 ELSE 0 END) FROM training_feedback")
-    row = cur.fetchone()
-    total = row[0] or 0
-    accepted = row[1] or 0
-    cur.execute(
-        "SELECT created_at, predicted_dosha, corrected_dosha, cleaned_notes, relevance_score, is_accepted, rejection_reason "
-        "FROM training_feedback ORDER BY id DESC LIMIT 10"
-    )
-    recent = cur.fetchall()
-    conn.close()
-    return {
-        "total": total,
-        "accepted": accepted,
-        "rejected": total - accepted,
-        "recent": recent
+        "accepted_samples_used": len(X)
     }
 
 
@@ -342,7 +263,7 @@ def save_patient_review(name: str, age: int, gender: str, rating: int, dominant_
         "INSERT INTO patient_reviews (created_at, patient_name, age, gender, rating, dominant_dosha, review_text) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-            (name or "Anonymous Patient").strip()[:60],
+            name.strip()[:60],
             int(age),
             gender,
             int(np.clip(rating, 1, 5)),
